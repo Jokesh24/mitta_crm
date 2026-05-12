@@ -764,133 +764,18 @@ class ResultController extends Controller
     }
     /** VIEW RESULT */
 
-    public function view_resultold($id)
-    {
-        $role = Session::get('team_role');
-        $userId = Session::get('admin_id');
-
-        $header = ResultHeader::with(['patient', 'results.test.unit'])->findOrFail($id);
-        // $op = Op::where('patient_id', $header->patient_id)->latest('id')->first();
-        // $op = Op::find($header->op_id);
-
-        $op = null;
-
-        if (!empty($header->op_id)) {
-            $op = Op::find($header->op_id);
-        }
-
-        // Fallback for old records
-        if (!$op) {
-            $op = Op::where('patient_id', $header->patient_id)
-                ->latest('id')
-                ->first();
-        }
-
-        if ($role == 2) {
-            if ($header->patient->added_by != $userId || $header->patient->added_by_role != 2) {
-                abort(403, "You are not allowed to view this result.");
-            }
-        }
-
-        $resultGroups = [];
-        $processedTestIds = [];
-
-        $packagesJson = [];
-
-        if ($op) {
-            $packagesJson = is_array($op->packages_json)
-                ? $op->packages_json
-                : json_decode($op->packages_json ?? '[]', true);
-        }
-
-        // $packagesJson = is_array($op->packages_json) ? $op->packages_json : json_decode($op->packages_json ?? '[]', true);
-        $testsNewJson = is_array($op->tests_new_json ?? null) ? $op->tests_new_json : json_decode($op->tests_new_json ?? '[]', true);
-
-        // 1. Process Standard Packages
-        // $packageIds = collect($packagesJson)->where('type', 'package')->pluck('id')->unique()->toArray();
-        $packageIds = collect($packagesJson)
-            ->map(function ($p) {
-                return is_array($p) ? ($p['id'] ?? null) : null;
-            })
-            ->filter()
-            ->unique()
-            ->toArray();
-        if (!empty($packageIds)) {
-            $packages = Package::whereIn('id', $packageIds)->get();
-            foreach ($packages as $pkg) {
-                $pkgTestIds = is_array($pkg->tests) ? $pkg->tests : json_decode($pkg->tests ?? '[]', true);
-                $groupResults = $header->results->whereIn('test_id', $pkgTestIds);
-
-                if ($groupResults->isNotEmpty()) {
-                    $resultGroups[] = [
-                        'title' => $pkg->package_name,
-                        'subgroups' => [
-                            [
-                                'group_name' => null,
-                                'results' => $this->sortByPackageOrder($groupResults, $pkgTestIds)
-                            ]
-                        ]
-                    ];
-                    $processedTestIds = array_merge($processedTestIds, $groupResults->pluck('test_id')->toArray());
-                }
-            }
-        }
-
-        // 2. Process Profiles (TestNew) with Sub-test Logic
-        $allProfileIds = array_unique(array_merge(
-            collect($testsNewJson)->pluck('id')->toArray(),
-            collect($packagesJson)->where('type', 'test_new')->pluck('id')->toArray()
-        ));
-
-        if (!empty($allProfileIds)) {
-            $profiles = TestNew::whereIn('id', $allProfileIds)->get();
-            foreach ($profiles as $profile) {
-                $params = is_array($profile->parameters) ? $profile->parameters : json_decode($profile->parameters ?? '[]', true);
-                $profileSubGroups = [];
-
-                // Handle Global Sub-group
-                $globalIds = $params['global'] ?? (isset($params[0]) ? $params : []);
-                if (!empty($globalIds)) {
-                    $res = $header->results->whereIn('test_id', $globalIds)->whereNotIn('test_id', $processedTestIds);
-                    if ($res->isNotEmpty()) {
-                        $profileSubGroups[] = ['group_name' => null, 'results' => $this->sortByPackageOrder($res, $globalIds)];
-                    }
-                }
-
-                // Handle Named Groups (Sub-tests)
-                if (isset($params['groups'])) {
-                    foreach ($params['groups'] as $g) {
-                        $res = $header->results->whereIn('test_id', $g['params'])->whereNotIn('test_id', $processedTestIds);
-                        if ($res->isNotEmpty()) {
-                            $profileSubGroups[] = ['group_name' => $g['group_name'], 'results' => $this->sortByPackageOrder($res, $g['params'])];
-                        }
-                    }
-                }
-
-                if (!empty($profileSubGroups)) {
-                    $resultGroups[] = [
-                        'title' => $profile->test_name,
-                        'subgroups' => $profileSubGroups
-                    ];
-                    foreach ($profileSubGroups as $sg) {
-                        $processedTestIds = array_merge($processedTestIds, $sg['results']->pluck('test_id')->toArray());
-                    }
-                }
-            }
-        }
-
-        // 3. Leftover Individual Tests
-        $individualResults = $header->results->whereNotIn('test_id', $processedTestIds);
-        if ($individualResults->isNotEmpty()) {
-            $resultGroups[] = [
-                'title' => 'Individual Tests',
-                'subgroups' => [['group_name' => null, 'results' => $individualResults->sortBy(fn($r) => $r->test->display_order ?? 999)]]
-            ];
-        }
-
-        return view('result_view', compact('header', 'op', 'resultGroups'));
-    }
-
+/**
+ * The PHP function `view_result` retrieves and organizes test result data based on user roles and
+ * package structures for display in a view.
+ * 
+ * @param id The `id` parameter is used to identify a specific result header record in the database. It
+ * is typically an integer value that uniquely identifies a result header entry. This parameter is
+ * crucial for fetching the relevant data associated with a specific result header when processing
+ * requests or generating reports.
+ * 
+ * @return The `view_result` function returns a view named 'result_view' with the variables ``,
+ * ``, and `` compacted.
+ */
     public function view_result($id)
     {
         $role = Session::get('team_role');
@@ -1092,43 +977,6 @@ class ResultController extends Controller
         return view('result_view', compact('header', 'op', 'resultGroups'));
     }
 
-    private function extractUniqueTestsFromOpold(Op $op)
-    {
-        $unique = [];
-
-        // From individual tests_json
-        if (is_array($op->tests_json)) {
-            foreach ($op->tests_json as $t) {
-                if (isset($t['id'])) {
-                    $unique[$t['id']] = $t['id'];
-                }
-            }
-        }
-
-        // From packages_json → expand package tests
-        if (is_array($op->packages_json)) {
-            foreach ($op->packages_json as $p) {
-                if ($p['type'] !== 'package')
-                    continue;
-
-                $package = Package::find($p['id']);
-                if (!$package)
-                    continue;
-
-                $testIds = json_decode($package->tests, true);
-
-                if (is_array($testIds)) {
-                    foreach ($testIds as $id) {
-                        $unique[(int) $id] = (int) $id;
-                    }
-                }
-            }
-        }
-
-        return array_values($unique);
-    }
-
-
     private function extractUniqueTestsFromOp(Op $op)
     {
         $unique = [];
@@ -1161,96 +1009,6 @@ class ResultController extends Controller
         }
 
         return array_values($unique);
-    }
-
-    /** * HELPER: Build Result Groups for Display/PDF 
-     * Groups results by Package Name or Profile Name
-     */
-    /**
-     * Helper to group results for PDF/View based on Op selections
-     */
-    private function buildResultGroupsold($op, $header)
-    {
-        $resultGroups = [];
-        $processedTestIds = [];
-
-        if (!$op)
-            return [];
-
-        $packagesJson = is_array($op->packages_json) ? $op->packages_json : json_decode($op->packages_json ?? '[]', true);
-        $testsNewJson = is_array($op->tests_new_json) ? $op->tests_new_json : json_decode($op->tests_new_json ?? '[]', true);
-
-        // 1. Process Packages
-        // $packageIds = collect($packagesJson)->where('type', 'package')->pluck('id')->unique()->toArray();
-
-        $packageIds = collect($packagesJson)
-            ->map(function ($p) {
-                return is_array($p) ? ($p['id'] ?? null) : null;
-            })
-            ->filter()
-            ->unique()
-            ->toArray();
-
-        if (!empty($packageIds)) {
-            $packages = Package::whereIn('id', $packageIds)->get();
-            foreach ($packages as $pkg) {
-                $pkgTestIds = is_array($pkg->tests) ? $pkg->tests : json_decode($pkg->tests ?? '[]', true);
-                $groupResults = $header->results->whereIn('test_id', $pkgTestIds);
-                if ($groupResults->isNotEmpty()) {
-                    $resultGroups[] = [
-                        'title' => $pkg->package_name,
-                        'subgroups' => [['group_name' => null, 'results' => $this->sortByPackageOrder($groupResults, $pkgTestIds)]]
-                    ];
-                    $processedTestIds = array_merge($processedTestIds, $groupResults->pluck('test_id')->toArray());
-                }
-            }
-        }
-
-        // 2. Process Profiles (TestNew)
-        $profileIds = array_unique(array_merge(
-            collect($testsNewJson)->pluck('id')->toArray(),
-            collect($packagesJson)->where('type', 'test_new')->pluck('id')->toArray()
-        ));
-
-        if (!empty($profileIds)) {
-            $profiles = TestNew::whereIn('id', $profileIds)->get();
-            foreach ($profiles as $profile) {
-                $params = is_array($profile->parameters) ? $profile->parameters : json_decode($profile->parameters ?? '[]', true);
-                $profileSubGroups = [];
-
-                $globalIds = $params['global'] ?? (isset($params[0]) ? $params : []);
-                if (!empty($globalIds)) {
-                    $res = $header->results->whereIn('test_id', $globalIds)->whereNotIn('test_id', $processedTestIds);
-                    if ($res->isNotEmpty())
-                        $profileSubGroups[] = ['group_name' => null, 'results' => $this->sortByPackageOrder($res, $globalIds)];
-                }
-
-                if (isset($params['groups'])) {
-                    foreach ($params['groups'] as $g) {
-                        $res = $header->results->whereIn('test_id', $g['params'])->whereNotIn('test_id', $processedTestIds);
-                        if ($res->isNotEmpty())
-                            $profileSubGroups[] = ['group_name' => $g['group_name'], 'results' => $this->sortByPackageOrder($res, $g['params'])];
-                    }
-                }
-
-                if (!empty($profileSubGroups)) {
-                    $resultGroups[] = ['title' => $profile->test_name, 'subgroups' => $profileSubGroups];
-                    foreach ($profileSubGroups as $sg)
-                        $processedTestIds = array_merge($processedTestIds, $sg['results']->pluck('test_id')->toArray());
-                }
-            }
-        }
-
-        // 3. Leftovers
-        $individualResults = $header->results->whereNotIn('test_id', $processedTestIds);
-        if ($individualResults->isNotEmpty()) {
-            $resultGroups[] = [
-                'title' => 'Individual Tests',
-                'subgroups' => [['group_name' => null, 'results' => $individualResults->sortBy(fn($r) => $r->test->display_order ?? 999)]]
-            ];
-        }
-
-        return $resultGroups;
     }
 
     private function buildResultGroups($op, $header)
@@ -1792,21 +1550,6 @@ class ResultController extends Controller
 
         return response()->json(['status' => 'error', 'message' => 'SMS gateway error.']);
     }
-
-    /**
-     * Public method to serve the PDF to patient via signed link
-     */
-    // public function public_report_download($id)
-    // {
-    //     $header = ResultHeader::with(['patient', 'results.test.unit'])->findOrFail($id);
-    //     $op = Op::where('patient_id', $header->patient_id)->latest('id')->first();
-    //     $resultGroups = $this->buildResultGroups($op, $header);
-
-    //     $pdf = Pdf::loadView('result_pdf', compact('header', 'op', 'resultGroups'))->setPaper('a4', 'portrait');
-
-    //     $fileName = preg_replace('/[^A-Za-z0-9]/', '', $header->patient->patient_name) . "_Report.pdf";
-    //     return $pdf->stream($fileName);
-    // }
 
     public function public_report_download(Request $request)
     {
