@@ -764,18 +764,18 @@ class ResultController extends Controller
     }
     /** VIEW RESULT */
 
-/**
- * The PHP function `view_result` retrieves and organizes test result data based on user roles and
- * package structures for display in a view.
- * 
- * @param id The `id` parameter is used to identify a specific result header record in the database. It
- * is typically an integer value that uniquely identifies a result header entry. This parameter is
- * crucial for fetching the relevant data associated with a specific result header when processing
- * requests or generating reports.
- * 
- * @return The `view_result` function returns a view named 'result_view' with the variables ``,
- * ``, and `` compacted.
- */
+    /**
+     * The PHP function `view_result` retrieves and organizes test result data based on user roles and
+     * package structures for display in a view.
+     * 
+     * @param id The `id` parameter is used to identify a specific result header record in the database. It
+     * is typically an integer value that uniquely identifies a result header entry. This parameter is
+     * crucial for fetching the relevant data associated with a specific result header when processing
+     * requests or generating reports.
+     * 
+     * @return The `view_result` function returns a view named 'result_view' with the variables ``,
+     * ``, and `` compacted.
+     */
     public function view_result($id)
     {
         $role = Session::get('team_role');
@@ -1499,11 +1499,49 @@ class ResultController extends Controller
         }
     }
 
+    public function public_report_download(Request $request)
+    {
+        $id = $request->id;
+        $expires = $request->expires;
+        $signature = $request->signature;
+
+        if (!$id || !$expires || !$signature) {
+            abort(403, 'Invalid request');
+        }
+
+        // 1. Expiry check
+        if (now()->timestamp > $expires) {
+            abort(403, 'Link expired');
+        }
+
+        // 2. MUST match EXACT same format used while generating
+        $baseUrl = url('/download-report-secure') . "?id=$id&expires=$expires";
+
+        $expectedSignature = sha1($baseUrl . config('app.key'));
+
+        // 3. Compare
+        if (!hash_equals($expectedSignature, $signature)) {
+            abort(403, 'Invalid signature');
+        }
+
+        // 4. Continue
+        $header = ResultHeader::with(['patient', 'results.test.unit'])->findOrFail($id);
+
+        $op = Op::where('patient_id', $header->patient_id)->latest('id')->first();
+        $resultGroups = $this->buildResultGroups($op, $header);
+
+        $pdf = Pdf::loadView('result_pdf', compact('header', 'op', 'resultGroups'))
+            ->setPaper('a4', 'portrait');
+
+        $fileName = preg_replace('/[^A-Za-z0-9]/', '', $header->patient->patient_name) . "_Report.pdf";
+
+        return $pdf->stream($fileName);
+    }
 
     /**
      * Handle Admin Request to send SMS
      */
-    public function send_sms_report(Request $request)
+    public function send_sms_reportold(Request $request)
     {
         $id = $request->id;
         $header = ResultHeader::with(['patient'])->find($id);
@@ -1551,49 +1589,10 @@ class ResultController extends Controller
         return response()->json(['status' => 'error', 'message' => 'SMS gateway error.']);
     }
 
-    public function public_report_download(Request $request)
-    {
-        $id = $request->id;
-        $expires = $request->expires;
-        $signature = $request->signature;
-
-        if (!$id || !$expires || !$signature) {
-            abort(403, 'Invalid request');
-        }
-
-        // 1. Expiry check
-        if (now()->timestamp > $expires) {
-            abort(403, 'Link expired');
-        }
-
-        // 2. MUST match EXACT same format used while generating
-        $baseUrl = url('/download-report-secure') . "?id=$id&expires=$expires";
-
-        $expectedSignature = sha1($baseUrl . config('app.key'));
-
-        // 3. Compare
-        if (!hash_equals($expectedSignature, $signature)) {
-            abort(403, 'Invalid signature');
-        }
-
-        // 4. Continue
-        $header = ResultHeader::with(['patient', 'results.test.unit'])->findOrFail($id);
-
-        $op = Op::where('patient_id', $header->patient_id)->latest('id')->first();
-        $resultGroups = $this->buildResultGroups($op, $header);
-
-        $pdf = Pdf::loadView('result_pdf', compact('header', 'op', 'resultGroups'))
-            ->setPaper('a4', 'portrait');
-
-        $fileName = preg_replace('/[^A-Za-z0-9]/', '', $header->patient->patient_name) . "_Report.pdf";
-
-        return $pdf->stream($fileName);
-    }
-
     /**
      * SMS Gateway Integration Point (Static)
      */
-    private function sendStaticSMS($mobile, $message)
+    private function sendStaticSMSold($mobile, $message)
     {
         // Log for verification since you don't have gateway code yet
         \Log::info("SMS to $mobile: $message");
@@ -1606,5 +1605,143 @@ class ResultController extends Controller
 
         return true; // Keep this true for now to simulate success
     }
+
+    public function send_sms_report(Request $request)
+    {
+        $id = $request->id;
+        $header = ResultHeader::with(['patient'])->find($id);
+        if (!$header) {
+            return response()->json(['status' => 'error', 'message' => 'Result not found.']);
+        }
+
+        // 1. Generate Secure Signed URL (valid for 7 days)
+        $id = $header->id;
+        $expires = now()->addDays(7)->timestamp;
+
+        // IMPORTANT: must match EXACTLY same format as validation
+        $baseUrl = url('/download-report-secure') . "?id=$id&expires=$expires";
+        $signature = sha1($baseUrl . config('app.key'));
+        $downloadLink = $baseUrl . "&signature=" . $signature;
+
+        // 2. Prepare Data
+        $mobile = preg_replace('/[^0-9]/', '', $header->mobile_number);
+        $patientName = $header->patient->patient_name ?? 'Patient';
+
+        // 3. Send SMS via SMSIndiaHub
+        $smsStatus = $this->sendStaticSMS($mobile, $id, $expires, $signature);
+
+        if ($smsStatus) {
+            return response()->json([
+                'status' => 'success',
+                'message' => 'SMS sent successfully!',
+                'preview_link' => $downloadLink
+            ]);
+        }
+
+        return response()->json(['status' => 'error', 'message' => 'SMS gateway error.']);
+    }
+
+    private function sendStaticSMS($mobile, $id, $expires, $signature)
+    {
+        try {
+            $user = 'Mittaexcellence';
+            $password = 'Mitta@2026';
+            $sid = 'MELABZ';
+            $templateId = '1207177451755498339';
+            $peId = '1201177337741922796';
+
+            /*
+             * DLT Template (registered):
+             * "Dear Sir/Madam, your test result report is ready. Please view/download here:
+             *  ##var##id=##var##&expires=##var##&signature=##var## Thank you. -Mitta Excellence"
+             *
+             * The 4 ##var## slots map to:
+             *   1. base URL  → https://mittaexcellence.com/crm/download-report-secure?
+             *   2. id value  → 21
+             *   3. expires   → 1779338321
+             *   4. signature → 685a2e...
+             *
+             * We must keep the static skeleton IDENTICAL to the DLT template and only
+             * substitute the dynamic parts where ##var## appears.
+             */
+            // $baseDownloadUrl = url('/download-report-secure') . "?"; // use app base URL, not hardcoded
+            $baseDownloadUrl = rtrim(config('app.url'), '/') . "/download-report-secure?";
+
+            // Build the message so its static text matches the template character-for-character.
+            // Each dynamic segment replaces one ##var## in the same order.
+            $message = "Dear Sir/Madam, your test result report is ready. Please view/download here: "
+                . $baseDownloadUrl          // ##var## slot 1
+                . "id=" . $id               // ##var## slot 2
+                . "&expires=" . $expires    // ##var## slot 3
+                . "&signature=" . $signature // ##var## slot 4
+                . " Thank you. \n-Mitta Excellence";
+
+            // -----------------------------------------------------------------------
+            // SMSIndiaHub endpoint
+            // -----------------------------------------------------------------------
+            $url = "http://cloud.smsindiahub.in/vendorsms/pushsms.aspx";
+
+            $postFields = http_build_query([
+                'user' => $user,
+                'password' => $password,
+                'msisdn' => '91' . ltrim($mobile, '0'),
+                'sid' => $sid,
+                'msg' => $message,
+                'fl' => '0',
+                'gwid' => '2',
+                'pe_id' => $peId,
+                'templateid' => $templateId,
+            ]);
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+            curl_setopt($ch, CURLOPT_POST, 1);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+            $response = curl_exec($ch);
+            $curlError = curl_error($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            \Log::info('SMSIndiaHub Response', [
+                'mobile' => $mobile,
+                'http_code' => $httpCode,
+                'response' => $response,
+                'curl_error' => $curlError,
+                'message' => $message,
+            ]);
+
+            if ($curlError) {
+                \Log::error("SMSIndiaHub cURL Error: {$curlError}");
+                return false;
+            }
+
+            // Parse response — supports both JSON and plain-text
+            $decoded = json_decode($response, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                if (isset($decoded['ErrorCode']) && $decoded['ErrorCode'] === '000') {
+                    return true;
+                }
+                \Log::warning('SMSIndiaHub non-success JSON', ['response' => $response]);
+                return false;
+            }
+
+            if (str_starts_with(trim($response), 'Sent#')) {
+                return true;
+            }
+
+            \Log::warning('SMSIndiaHub unexpected response', ['response' => $response]);
+            return false;
+
+        } catch (\Exception $e) {
+            \Log::error("SMSIndiaHub Exception: " . $e->getMessage());
+            return false;
+        }
+    }
+
 
 }
