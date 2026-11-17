@@ -1606,7 +1606,7 @@ class ResultController extends Controller
         return true; // Keep this true for now to simulate success
     }
 
-    public function send_sms_report(Request $request)
+    public function send_sms_reportnew(Request $request)
     {
         $id = $request->id;
         $header = ResultHeader::with(['patient'])->find($id);
@@ -1641,7 +1641,7 @@ class ResultController extends Controller
         return response()->json(['status' => 'error', 'message' => 'SMS gateway error.']);
     }
 
-    private function sendStaticSMS($mobile, $id, $expires, $signature)
+    private function sendStaticSMSnew($mobile, $id, $expires, $signature)
     {
         try {
             $user = 'Mittaexcellence';
@@ -1743,5 +1743,159 @@ class ResultController extends Controller
         }
     }
 
+    public function send_sms_report(Request $request)
+    {
+        $id = $request->id;
+        $header = ResultHeader::with(['patient'])->find($id);
+
+        if (!$header) {
+            return response()->json(['status' => 'error', 'message' => 'Result not found.']);
+        }
+
+        // 1. Generate Secure Code / Token
+        $shortCode = $header->short_code ?? substr(md5($header->id . config('app.key')), 0, 7);
+
+        // 2. Prepare Data - strictly parse only the last 10 digits
+        $mobile = preg_replace('/[^0-9]/', '', $header->mobile_number);
+        if (strlen($mobile) > 10) {
+            $mobile = substr($mobile, -10);
+        }
+
+        // 3. Send SMS via SMSIndiaHub (Pass only the shortCode as the variable)
+        $smsStatus = $this->sendStaticSMS($mobile, $shortCode);
+
+        // For the frontend JSON response preview link
+        $previewLink = "https://mittaexcellence.com/crm/MELABZ/r/" . $shortCode;
+
+        if ($smsStatus) {
+            return response()->json([
+                'status' => 'success',
+                'message' => 'SMS sent successfully!',
+                'preview_link' => $previewLink
+            ]);
+        }
+
+        return response()->json(['status' => 'error', 'message' => 'SMS gateway error. Please check logs.']);
+    }
+
+    private function sendStaticSMS($mobile, $shortCode)
+    {
+        try {
+            $user = 'Mittaexcellence';
+            $password = 'Mitta@2026';
+            $sid = 'MELABZ';
+            $templateId = '1207177450365115270';
+            $peId = '1201177337741922796';
+
+            /*
+             * MATCHING DLT STRICTLY:
+             * Since the domain and path are static in your DLT portal, 
+             * only $shortCode represents the variable {#var#}.
+             */
+            $message = "Dear Sir/Madam, your test result report is ready. Please view/download here: https://mittaexcellence.com/crm/MELABZ/r/"
+                . $shortCode
+                . " Thank you. - Mitta Excellence";
+
+            $url = "http://cloud.smsindiahub.in/vendorsms/pushsms.aspx";
+
+            $postFields = http_build_query([
+                'user' => $user,
+                'password' => $password,
+                'msisdn' => '91' . $mobile,
+                'sid' => $sid,
+                'msg' => $message,
+                'fl' => '0',
+                'gwid' => '2',
+                'pe_id' => $peId,
+                'templateid' => $templateId,
+            ]);
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+            curl_setopt($ch, CURLOPT_POST, 1);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+            $response = curl_exec($ch);
+            $curlError = curl_error($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($curlError) {
+                \Log::error("SMSIndiaHub cURL Error: {$curlError}");
+                return false;
+            }
+
+            $decoded = json_decode($response, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                if (isset($decoded['ErrorCode']) && $decoded['ErrorCode'] === '000') {
+                    return true;
+                }
+                return false;
+            }
+
+            if (str_starts_with(trim($response), 'Sent#') || stripos($response, 'success') !== false) {
+                return true;
+            }
+
+            return false;
+
+        } catch (\Exception $e) {
+            \Log::error("SMSIndiaHub Exception: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    public function public_report_short_download($code)
+    {
+        if (!$code) {
+            abort(403, 'Invalid request');
+        }
+
+        $header = null;
+
+        // Efficiently chunk to locate the dynamically hashed unique code
+        ResultHeader::select('id', 'created_at', 'patient_id', 'mobile_number', 'op_id')
+            ->chunk(200, function ($headers) use ($code, &$header) {
+                foreach ($headers as $item) {
+                    $calculatedCode = substr(md5($item->id . config('app.key')), 0, 7);
+                    if ($calculatedCode === $code) {
+                        $header = $item;
+                        return false;
+                    }
+                }
+            });
+
+        if (!$header) {
+            abort(404, 'Report not found');
+        }
+
+        // 3. Expiration Check (7 Days)
+        // BUG FIX: Wrapped in Carbon::parse so it creates a copy and doesn't mutate the original created_at timestamp
+        // if (\Carbon\Carbon::parse($header->created_at)->addDays(7)->isPast()) {
+        //     abort(403, 'Link expired');
+        // }
+
+        // Load relational data
+        $header->load(['patient', 'results.test.unit']);
+
+        $op = Op::where('patient_id', $header->patient_id)->latest('id')->first();
+        $resultGroups = $this->buildResultGroups($op, $header);
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('result_pdf', compact('header', 'op', 'resultGroups'))
+            ->setPaper('a4', 'portrait');
+
+        $fileName = preg_replace('/[^A-Za-z0-9]/', '', $header->patient->patient_name ?? 'Patient') . "_Report.pdf";
+
+        return $pdf->stream($fileName);
+    }
+
+
+    /* ============================================================
+    Dear Sir/Madam, your test result report is ready. Please view/download here: https://mittaexcellence.com/MELABZ/r/A92KD7X Thank you. - Mitta Excellence
+    */
 
 }

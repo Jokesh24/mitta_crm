@@ -139,10 +139,13 @@ Route::prefix('admin')->group(function () {
 // ResultController
 use App\Http\Controllers\admin\ResultController;
 
+// Public route for patients to download via dynamic short link code
+Route::get('MELABZ/r/{code}', [ResultController::class, 'public_report_short_download'])
+    ->name('public-report-short-download');
+
 // Public route for patients to download via SMS link
 Route::get('download-report-secure', [ResultController::class, 'public_report_download'])
     ->name('public-report-download');
-
 Route::prefix('admin')->group(function () {
 
     Route::get('add_result', [ResultController::class, 'add_result'])->name('add-result');
@@ -172,10 +175,7 @@ Route::prefix('admin')->group(function () {
     Route::get('op/{id}/enter-results', [ResultController::class, 'add_result_from_op'])
         ->name('add-result-from-op');
 
-    Route::prefix('admin')->group(function () {
-        // ... existing routes ...
-        Route::post('send-sms-report', [ResultController::class, 'send_sms_report'])->name('send-sms-report');
-    });
+    Route::post('send-sms-report', [ResultController::class, 'send_sms_report'])->name('send-sms-report');
 
 });
 

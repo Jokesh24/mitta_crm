@@ -218,6 +218,16 @@
                 </div>
             </div>
 
+            @if($errors->any())
+                <div class="alert alert-danger">
+                    <ul class="mb-0">
+                        @foreach($errors->all() as $error)
+                            <li>{{ $error }}</li>
+                        @endforeach
+                    </ul>
+                </div>
+            @endif
+
             <div class="crm-card">
                 <form autocomplete="off" id="opForm" method="POST" action="{{ route('update-op', $op->id) }}">
                     @csrf
@@ -248,7 +258,8 @@
                                         value="{{ old('patient_name', $op->patient->patient_name ?? '') }}"
                                         class="form-control">
                                 </div>
-                                <input type="hidden" id="patient_type" name="patient_type" value="existing">
+                                <!-- <input type="hidden" id="patient_type" name="patient_type" value="existing"> -->
+                                <input type="hidden" id="patient_type" name="patient_type" value="new">
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label">Date of Birth</label>
